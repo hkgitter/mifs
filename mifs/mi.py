@@ -56,12 +56,11 @@ def get_first_mi_vector(MI_FS, k):
                                         for i in range(p))
     return MIs
 
-
 def _get_first_mi(i, k, MI_FS):
     n, p = MI_FS.X.shape
     if MI_FS.categorical:
         x = MI_FS.X[:, i].reshape((n, 1))
-        MI = _mi_dc(x, MI_FS.y, k)
+        MI = _mi_dc_single(x, MI_FS.y, k)
     else:
         vars = (MI_FS.X[:, i].reshape((n, 1)), MI_FS.y)
         MI = _mi_cc(vars, k)
@@ -72,6 +71,25 @@ def _get_first_mi(i, k, MI_FS):
     else:
         return np.nan
 
+def _mi_dc_single(x, y, k):
+    """
+    Calculates the mututal information between a continuous vector x and a
+    disrete class vector y.
+
+    This implementation can calculate the MI between the marginal distribution of
+    one continuous variable (X) with a discrete variable (y).
+
+    Feature selection module from Scikit-learn package is used for the sake of this calculation
+    See https://scikit-learn.org/stable/modules/generated/sklearn.feature_selection.mutual_info_classif.html
+
+    """
+    import sklearn.feature_selection as skfs
+    MI = skfs.mutual_info_classif(x,
+                                  y,
+                                  discrete_features=False,
+                                  n_neighbors=k,
+                                  copy=True)
+    return MI
 
 def _mi_dc(x, y, k):
     """
