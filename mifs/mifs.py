@@ -10,6 +10,8 @@ from scipy import signal
 from sklearn.utils import check_X_y
 from sklearn.preprocessing import StandardScaler
 from sklearn.externals.joblib.parallel import cpu_count
+from sklearn.base import BaseEstimator
+from sklearn.feature_selection.base import SelectorMixin
 import bottleneck as bn
 from . import mi
 
@@ -17,7 +19,7 @@ from . import mi
 NUM_CORES = cpu_count()
 
 
-class MutualInformationFeatureSelector(object):
+class MutualInformationFeatureSelector(BaseEstimator, SelectorMixin):
     """
     MI_FS stands for Mutual Information based Feature Selection.
     This class contains routines for selecting features using both
@@ -128,6 +130,12 @@ class MutualInformationFeatureSelector(object):
         self.categorical = categorical
         self.n_jobs = n_jobs
         self.verbose = verbose
+        self._support_mask = None
+
+    def _get_support_mask(self):
+        if self._support_mask is None:
+            raise ValueError('mRMR has not been fitted yet!')
+        return self._support_mask
 
     def fit(self, X, y):
         """
@@ -146,50 +154,6 @@ class MutualInformationFeatureSelector(object):
         if self.n_jobs < 0:
             self.n_jobs = NUM_CORES - self.n_jobs
 
-        return self._fit(X, y)
-
-
-    def transform(self, X):
-        """
-        Reduces the input X to the features selected by chosen MI_FS method.
-
-        Parameters
-        ----------
-        X : array-like, shape = [n_samples, n_features]
-            The training input samples.
-
-        Returns
-        -------
-        X : array-like, shape = [n_samples, n_features_]
-            The input matrix X's columns are reduced to the features which were
-            selected by the chosen MI_FS method.
-        """
-
-        return self._transform(X)
-
-    def fit_transform(self, X, y):
-        """
-        Fits MI_FS, then reduces the input X to the selected features.
-
-        Parameters
-        ----------
-        X : array-like, shape = [n_samples, n_features]
-            The training input samples.
-
-        y : array-like, shape = [n_samples]
-            The target values.
-
-        Returns
-        -------
-        X : array-like, shape = [n_samples, n_features_]
-            The input matrix X's columns are reduced to the features which were
-            selected by the chosen MI_FS method .
-        """
-
-        self._fit(X, y)
-        return self._transform(X)
-
-    def _fit(self, X, y):
         self.X, y = self._check_params(X, y)
         n, p = X.shape
         self.y = y.reshape((n, 1))
@@ -197,7 +161,7 @@ class MutualInformationFeatureSelector(object):
         # list of selected features
         S = []
         # list of all features
-        F = range(p)
+        F = list(range(p))
 
         if self.n_features != 'auto':
             feature_mi_matrix = np.zeros((self.n_features, p))
@@ -210,14 +174,7 @@ class MutualInformationFeatureSelector(object):
         # FIND FIRST FEATURE
         # ---------------------------------------------------------------------
 
-        # check a range of ks (3-10), and choose the one with the max median MI
-        k_min = 3
-        k_max = 11
-        xy_MI = np.zeros((k_max-k_min, p))
-        xy_MI[:] = np.nan
-        for i, k in enumerate(range(k_min, k_max)):
-            xy_MI[i, :] = mi.get_first_mi_vector(self, k)
-        xy_MI = bn.nanmedian(xy_MI, axis=0)
+        xy_MI = np.array(mi.get_first_mi_vector(self, self.k))
 
         # choose the best, add it to S, remove it from F
         S, F = self._add_remove(S, F, bn.nanargmax(xy_MI))
@@ -230,24 +187,32 @@ class MutualInformationFeatureSelector(object):
         # ---------------------------------------------------------------------
         # FIND SUBSEQUENT FEATURES
         # ---------------------------------------------------------------------
-
-        while len(S) < self.n_features:
+        if self.n_features == 'auto': n_features = np.inf
+        else: n_features = self.n_features
+         
+        while len(S) < n_features:
             # loop through the remaining unselected features and calculate MI
             s = len(S) - 1
-            feature_mi_matrix[s, F] = mi.get_mi_vector(self, F, s)
+            feature_mi_matrix[s, F] = mi.get_mi_vector(self, F, S[-1])
 
             # make decision based on the chosen FS algorithm
             fmm = feature_mi_matrix[:len(S), F]
             if self.method == 'JMI':
                 selected = F[bn.nanargmax(bn.nansum(fmm, axis=0))]
             elif self.method == 'JMIM':
+                if bn.allnan(bn.nanmin(fmm, axis = 0)):
+                    break
                 selected = F[bn.nanargmax(bn.nanmin(fmm, axis=0))]
             elif self.method == 'MRMR':
+                if bn.allnan(bn.nanmean(fmm, axis = 0)):
+                    break
                 MRMR = xy_MI[F] - bn.nanmean(fmm, axis=0)
                 selected = F[bn.nanargmax(MRMR)]
+                S_mi.append(bn.nanmax(MRMR))
 
             # record the JMIM of the newly selected feature and add it to S
-            S_mi.append(bn.nanmax(bn.nanmin(fmm, axis=0)))
+            if self.method != 'MRMR':
+                S_mi.append(bn.nanmax(bn.nanmin(fmm, axis=0)))
             S, F = self._add_remove(S, F, selected)
 
             # notify user
@@ -267,21 +232,12 @@ class MutualInformationFeatureSelector(object):
         # ---------------------------------------------------------------------
 
         self.n_features_ = len(S)
-        self.support_ = np.zeros(p, dtype=np.bool)
-        self.support_[S] = 1
+        self._support_mask = np.zeros(p, dtype=np.bool)
+        self._support_mask[S] = True
         self.ranking_ = S
         self.mi_ = S_mi
 
         return self
-
-    def _transform(self, X):
-        # sanity check
-        try:
-            self.ranking_
-        except AttributeError:
-            raise ValueError('You need to call the fit(X, y) method first.')
-        X = X[:, self.support_]
-        return X
 
     def _isinteger(self, x):
         return np.all(np.equal(np.mod(x, 1), 0))
@@ -293,7 +249,7 @@ class MutualInformationFeatureSelector(object):
         if not self.categorical:
             ss = StandardScaler()
             X = ss.fit_transform(X)
-            y = ss.fit_transform(y)
+            y = ss.fit_transform(y.reshape(-1, 1))
 
         # sanity checks
         methods = ['JMI', 'JMIM', 'MRMR']
@@ -311,9 +267,9 @@ class MutualInformationFeatureSelector(object):
         if not isinstance(self.categorical, bool):
             raise ValueError('Categorical must be Boolean.')
         if self.categorical and np.unique(y).shape[0] > 5:
-            print 'Are you sure y is categorical? It has more than 5 levels.'
+            print ('Are you sure y is categorical? It has more than 5 levels.')
         if not self.categorical and self._isinteger(y):
-            print 'Are you sure y is continuous? It seems to be discrete.'
+            print ('Are you sure y is continuous? It seems to be discrete.')
         if self._isinteger(X):
             print ('The values of X seem to be discrete. MI_FS will treat them'
                    'as continuous.')
@@ -337,5 +293,5 @@ class MutualInformationFeatureSelector(object):
                     str(self.n_features) + ' : ' + str(S[-1]))
 
         if self.verbose > 1:
-            out += ', JMIM: ' + str(MIs[-1])
-        print out
+            out += ', ' + self.method + ' : ' + str(MIs[-1])
+        print (out)
